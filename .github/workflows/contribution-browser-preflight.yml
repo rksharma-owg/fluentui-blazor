@@ -1,0 +1,68 @@
+name: Contribution browser preflight
+on:
+  push:
+    branches: [ci/contribution-browser-preflight]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sha: a1ff4a940b839c958c5754eceb0ff42a7df9c771
+            test: FluentTabsTests
+            route: /tabs/nested
+          - sha: dd293bd812ac7ecc590c753cef61ca2e999546f6
+            test: FluentPopoverTests
+            route: /popover/resize
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.sha }}
+      - name: Verify tested commit
+        run: test "$(git rev-parse HEAD)" = '${{ matrix.sha }}'
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Build integration tests
+        run: dotnet build tests/Integration/Components.IntegrationTests.csproj
+      - name: Install Chromium
+        shell: pwsh
+        run: ./tests/Integration/bin/Debug/net10.0/playwright.ps1 install --with-deps chromium
+      - name: Run browser regression
+        env:
+          TEST_CLASS: ${{ matrix.test }}
+          TEST_ROUTE: ${{ matrix.route }}
+        run: |
+          python3 - <<'PY'
+          import subprocess, os, signal, time, urllib.request
+          from pathlib import Path
+          root = Path.cwd()
+          with open('integration-server.log', 'w') as log:
+              server = subprocess.Popen(['dotnet', 'run', '--urls', 'http://localhost:5050', '-f', 'net10.0', '-c', 'Debug', '--no-build'], cwd=root/'tests/Integration', stdout=log, stderr=log, start_new_session=True)
+              try:
+                  for attempt in range(300):
+                      try:
+                          urllib.request.urlopen('http://localhost:5050'+os.environ['TEST_ROUTE'], timeout=1)
+                          break
+                      except Exception:
+                          time.sleep(.1)
+                  else:
+                      raise RuntimeError('Test server not ready')
+                  subprocess.run(['dotnet', 'vstest', 'tests/Integration/bin/Debug/net10.0/Microsoft.FluentUI.AspNetCore.Components.IntegrationTests.dll', '--TestCaseFilter:FullyQualifiedName~'+os.environ['TEST_CLASS'], '--logger:trx;LogFileName=browser.trx'], check=True)
+              finally:
+                  os.killpg(server.pid, signal.SIGTERM)
+                  server.wait(timeout=10)
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: browser-${{ matrix.test }}
+          path: |
+            integration-server.log
+            **/browser.trx
